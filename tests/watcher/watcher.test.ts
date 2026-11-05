@@ -1,7 +1,8 @@
+import type { SidecarRunner } from '../../src/watcher/watcher.ts'
 import { describe, expect, it, onTestFinished } from 'vitest'
 import { PeerSyncBroker } from '../../src/peer-sync/broker.ts'
 import { SidecarTodoWatcher } from '../../src/watcher/watcher.ts'
-import { fakeSidecar } from '../fake-sidecar.ts'
+import { fakeSidecar, zeroUsage } from '../fake-sidecar.ts'
 
 function createBroker(): PeerSyncBroker {
   const broker = new PeerSyncBroker(':memory:', '/repo')
@@ -43,7 +44,7 @@ describe('sidecarTodoWatcher', () => {
 
     watcher.onToolResult({ toolName: 'read', input: { path: 'src/schema.ts' }, isError: false })
     expect(await watcher.runPass(sidecar.runner)).toBe(false)
-    expect(sidecar.prompts).toHaveLength(0)
+    expect(sidecar.requests).toHaveLength(0)
 
     watcher.onToolResult({
       toolName: 'edit',
@@ -54,7 +55,56 @@ describe('sidecarTodoWatcher', () => {
       isError: false,
     })
     await watcher.runPass(sidecar.runner)
-    expect(sidecar.prompts[0]).toContain('Modified files in this burst: src/schema.ts')
+    expect(sidecar.requests[0]?.prompt).toContain('Modified files: src/schema.ts')
+  })
+
+  it('sends each later pass as a follow-up to the exchanges before it', async () => {
+    const watcher = createWatcher(createBroker(), 'peer-calc', ['Implement add in src/calc.ts', 'Run bun test'])
+    const sidecar = fakeSidecar('{"completedTasks": ["#1"]}', { completedTasks: ['#2'] })
+
+    watcher.onToolResult({
+      toolName: 'write',
+      input: { path: 'src/calc.ts', content: 'export function add(a: number, b: number) { return a + b; }' },
+      isError: false,
+    })
+    await watcher.runPass(sidecar.runner)
+    watcher.onToolResult({ toolName: 'bash', input: { command: 'bun test' }, output: '1 pass', isError: false })
+    await watcher.runPass(sidecar.runner)
+
+    const [opening, followUp] = sidecar.requests
+    expect(opening?.transcript).toEqual([])
+    expect(followUp?.transcript).toEqual([{ prompt: opening?.prompt, replyText: '{"completedTasks": ["#1"]}' }])
+    expect(followUp?.prompt).not.toContain('User Goal')
+    expect(followUp?.prompt).not.toContain('Implement add in src/calc.ts')
+    expect(followUp?.prompt).toContain('Open Todo Items:\n#2 [in_progress]: Run bun test')
+    expect(followUp?.prompt).toContain('bash("bun test") -> ok (exit 0)')
+  })
+
+  it('starts the transcript over once the provider serves none of a replay from its cache', async () => {
+    const watcher = createWatcher(createBroker(), 'peer-uncached', ['Step A', 'Step B', 'Step C'])
+    const sidecar = fakeSidecar({}, {}, {})
+    const uncachedRunner: SidecarRunner = async request => ({ ...(await sidecar.runner(request)), usage: zeroUsage })
+
+    for (const path of ['src/a.ts', 'src/b.ts', 'src/c.ts']) {
+      watcher.onToolResult({ toolName: 'edit', input: { path }, isError: false })
+      await watcher.runPass(uncachedRunner)
+    }
+
+    expect(sidecar.requests.map(request => request.transcript.length)).toEqual([0, 1, 0])
+    expect(sidecar.requests[2]?.prompt).toContain('Modified files so far: src/a.ts, src/b.ts, src/c.ts')
+  })
+
+  it('starts the transcript over once it outgrows its budget', async () => {
+    const watcher = createWatcher(createBroker(), 'peer-long', ['Step A', 'Step B'])
+    const sidecar = fakeSidecar({ milestoneSummary: 'x'.repeat(100_000) }, {})
+
+    watcher.onToolResult({ toolName: 'edit', input: { path: 'src/a.ts' }, isError: false })
+    await watcher.runPass(sidecar.runner)
+    watcher.onToolResult({ toolName: 'edit', input: { path: 'src/b.ts' }, isError: false })
+    await watcher.runPass(sidecar.runner)
+
+    expect(sidecar.requests[1]?.transcript).toEqual([])
+    expect(sidecar.requests[1]?.prompt).toContain('Modified files so far: src/a.ts, src/b.ts')
   })
 
   it("applies the sidecar's completions, drops, and additions and advances the active task", async () => {
@@ -92,7 +142,7 @@ describe('sidecarTodoWatcher', () => {
     )
     await backend.runPass(sidecar.runner, { gitDiff: '+role: UserRole' })
 
-    expect(sidecar.prompts[0]).toContain('+role: UserRole')
+    expect(sidecar.requests[0]?.prompt).toContain('+role: UserRole')
     expect(backend.activeTask?.id).toBe('#2')
 
     const notice = frontend.onToolResult({
@@ -172,16 +222,18 @@ describe('sidecarTodoWatcher', () => {
     expect(reasons[3]).toBeUndefined()
   })
 
-  it('starts a fresh list when a new prompt follows a finished one (#41359)', async () => {
+  it('starts a fresh list and transcript when a new prompt follows a finished one (#41359)', async () => {
     const watcher = createWatcher(createBroker(), 'peer-alive', ['Step A'])
-    watcher.markTaskCompleted('#1')
+    const sidecar = fakeSidecar({ completedTasks: ['#1'] }, { initTasks: ['Add the billing webhook route'] })
+    watcher.onToolResult({ toolName: 'edit', input: { path: 'src/a.ts' }, isError: false })
+    await watcher.runPass(sidecar.runner)
 
     expect(watcher.onUserInput('Now build the billing webhook handler')).toEqual({ clearedFinishedList: true })
     expect(watcher.phases).toHaveLength(0)
 
-    const sidecar = fakeSidecar({ initTasks: ['Add the billing webhook route'] })
     await watcher.runPass(sidecar.runner)
-    expect(sidecar.prompts[0]).toContain('User Goal: Now build the billing webhook handler')
+    expect(sidecar.requests[1]?.transcript).toEqual([])
+    expect(sidecar.requests[1]?.prompt).toContain('User Goal: Now build the billing webhook handler')
   })
 
   it('vetoes checking off a verification task after a failed test run', async () => {
@@ -204,7 +256,7 @@ describe('sidecarTodoWatcher', () => {
     const sidecar = fakeSidecar({ completedTasks: ['#1', '#2'] })
     await watcher.runPass(sidecar.runner)
 
-    expect(sidecar.prompts[0]).toContain('bash("bun test") -> FAILED | error: 1 fail, 0 pass')
+    expect(sidecar.requests[0]?.prompt).toContain('bash("bun test") -> FAILED | error: 1 fail, 0 pass')
     expect(watcher.phases[0]?.tasks.map(task => task.status)).toEqual(['completed', 'in_progress'])
   })
 
@@ -247,9 +299,8 @@ describe('sidecarTodoWatcher', () => {
     })
     await watcher.runPass(sidecar.runner)
 
-    expect(sidecar.prompts[0]).toContain('Investigated/Read files so far: src/auth.ts, src/session.ts')
-    expect(sidecar.prompts[0]).toContain('symbols=[export class SessionStore')
-    expect(sidecar.prompts[0]).toContain('SessionStore.isExpired')
+    expect(sidecar.requests[0]?.prompt).toContain('symbols=[export class SessionStore')
+    expect(sidecar.requests[0]?.prompt).toContain('SessionStore.isExpired')
     expect(watcher.activeTask?.id).toBe('#2')
   })
 })

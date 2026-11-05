@@ -3,6 +3,7 @@ import type { ModelTokenUsage } from '../watcher/telemetry.ts'
 export interface OmpResolvedModel {
   id: string
   provider: string
+  api: string
 }
 
 export interface OmpTheme {

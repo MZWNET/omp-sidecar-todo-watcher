@@ -7,7 +7,7 @@ import { formatPeerSyncNotices } from '../peer-sync/notices.ts'
 import { redactSecrets } from '../privacy.ts'
 import { allTasks, isIncomplete, isOpen, matchesTodo, normalizePhases } from '../todos.ts'
 import { Burst } from './burst.ts'
-import { buildDeltaPrompt, buildInitPrompt } from './prompts.ts'
+import { buildFollowUpPrompt, buildOpeningPrompt } from './prompts.ts'
 import { createUsageTelemetry, recordSidecarCall } from './telemetry.ts'
 import {
   extractFilePaths,
@@ -28,8 +28,19 @@ export interface SidecarReply {
   usage: ModelTokenUsage
 }
 
+/** One sidecar call: the earlier exchanges on the current todo list, replayed unchanged, then the new prompt, so each call extends the previous one and prompt caches that only match whole earlier requests still hit */
+export interface SidecarRequest {
+  transcript: readonly SidecarExchange[]
+  prompt: string
+}
+
+export interface SidecarExchange {
+  prompt: string
+  replyText: string
+}
+
 /** Rejects once `signal` aborts, so an aborted pass changes nothing */
-export type SidecarRunner = (promptText: string, signal?: AbortSignal) => Promise<SidecarReply>
+export type SidecarRunner = (request: SidecarRequest, signal?: AbortSignal) => Promise<SidecarReply>
 
 export interface ToolResult {
   toolName: string
@@ -39,6 +50,9 @@ export interface ToolResult {
 }
 
 const maxStopBlocks = 3
+
+/** Long enough for a prefix cache to serve most of a long list, short enough to bound what one cache miss re-bills */
+const maxTranscriptTextLength = 96_000
 
 const verificationTaskPattern =
   /\b(?:bun\s+test|npm\s+test|pnpm\s+test|vitest|jest|pytest|cargo\s+test|go\s+test|tsc|typecheck|lint)\b|运行.*测试|跑通.*测试|验证通过/i
@@ -58,8 +72,7 @@ export class SidecarTodoWatcher {
   #burst = new Burst()
   readonly #cumulativeReadFiles = new Set<string>()
   readonly #cumulativeTouchedFiles = new Set<string>()
-  #turnLedger: string[] = []
-  #turnCount = 0
+  #transcript: SidecarExchange[] = []
   #userGoal = ''
   #pendingTailNotices: string[] = []
   #stopBlockCount = 0
@@ -184,7 +197,6 @@ export class SidecarTodoWatcher {
   ): Promise<boolean> {
     const { force = false } = options
     if (!force && !this.isPassDue) return false
-    this.#turnCount++
     const initializing = this.#phases.length === 0
 
     // Snapshot and reset BEFORE awaiting network I/O so concurrent tool completions
@@ -192,18 +204,18 @@ export class SidecarTodoWatcher {
     const burst = this.#burst
     this.#burst = new Burst()
     const diff = [...burst.codeSnippets, options.gitDiff ?? ''].filter(Boolean).join('\n')
-    const promptText = initializing
-      ? buildInitPrompt({ userGoal: this.#userGoal, burst, diff })
-      : buildDeltaPrompt({
-          userGoal: this.#userGoal,
-          phases: this.#phases,
-          turnLedger: this.#turnLedger,
-          cumulativeReadFiles: this.#cumulativeReadFiles,
-          cumulativeTouchedFiles: this.#cumulativeTouchedFiles,
-          burst,
-          diff,
-        })
-    const verdict = await this.#askSidecar(runner, initializing ? 'init' : 'delta', promptText, options.signal)
+    const prompt =
+      this.#transcript.length === 0
+        ? buildOpeningPrompt({
+            userGoal: this.#userGoal,
+            phases: this.#phases,
+            cumulativeReadFiles: this.#cumulativeReadFiles,
+            cumulativeTouchedFiles: this.#cumulativeTouchedFiles,
+            burst,
+            diff,
+          })
+        : buildFollowUpPrompt({ userPrompt: this.#userGoal, phases: this.#phases, burst, diff })
+    const verdict = await this.#askSidecar(runner, initializing ? 'init' : 'delta', prompt, options.signal)
     if (!verdict) return false
 
     const initTasks = initializing ? (verdict.initTasks ?? []) : []
@@ -218,7 +230,6 @@ export class SidecarTodoWatcher {
       'completed',
       task => !isCompletionVetoed(task, burst, force),
     )
-    this.#appendLedgerEntry(burst, completed)
     const dropped = initializing ? [] : this.#transitionOpenTasks(verdict.dropTasks, 'abandoned')
     const appended = initializing ? [] : appendNewTasks(this.#phases, this.#phases.at(-1)!, verdict.appendTasks ?? [])
 
@@ -271,7 +282,7 @@ export class SidecarTodoWatcher {
     this.#burst = new Burst()
     this.#cumulativeReadFiles.clear()
     this.#cumulativeTouchedFiles.clear()
-    this.#turnLedger = []
+    this.#transcript = []
     this.#stopBlockCount = 0
     this.#updatePhases(phases)
   }
@@ -328,11 +339,12 @@ export class SidecarTodoWatcher {
   async #askSidecar(
     runner: SidecarRunner,
     kind: 'init' | 'delta',
-    promptText: string,
+    prompt: string,
     signal: AbortSignal | undefined,
   ): Promise<SidecarVerdict | undefined> {
+    const transcript = this.#transcript
     const startedAt = performance.now()
-    const reply = await runner(promptText, signal)
+    const reply = await runner({ transcript, prompt }, signal)
     recordSidecarCall(this.telemetry, {
       kind,
       mode: reply.mode,
@@ -340,7 +352,23 @@ export class SidecarTodoWatcher {
       usage: reply.usage,
       durationMs: performance.now() - startedAt,
     })
-    return parseSidecarVerdict(reply.replyText)
+    const verdict = parseSidecarVerdict(reply.replyText)
+    // Ephemeral turns never send the transcript, so their prompts must stay openings
+    if (verdict && reply.mode === 'detached-smol') {
+      this.#recordExchange(transcript, { prompt, replyText: reply.replyText }, reply.usage)
+    }
+    return verdict
+  }
+
+  /** Extends `transcript` with the exchange, or starts the list's transcript over when resending it stops paying off */
+  #recordExchange(transcript: SidecarExchange[], exchange: SidecarExchange, usage: ModelTokenUsage): void {
+    // A provider that served none of the replay from its cache would bill the whole transcript on every call
+    if (transcript.length > 0 && usage.cacheRead === 0) {
+      this.#transcript = []
+      return
+    }
+    transcript.push(exchange)
+    if (transcriptTextLength(transcript) > maxTranscriptTextLength) this.#transcript = []
   }
 
   /** Moves open tasks named by the sidecar to `status`, returning their contents */
@@ -358,18 +386,10 @@ export class SidecarTodoWatcher {
     }
     return transitioned
   }
+}
 
-  #appendLedgerEntry(burst: Burst, completed: readonly string[]): void {
-    const facts = [
-      burst.touchedFiles.size > 0 ? `files=[${[...burst.touchedFiles].join(',')}]` : '',
-      burst.readEvidence.length > 0 ? `investigated=[${burst.readEvidence.slice(0, 3).join('; ')}]` : '',
-      burst.toolActions.length > 0 ? `actions=[${burst.toolActions.slice(0, 3).join('; ')}]` : '',
-      completed.length > 0 ? `completed=[${completed.join('; ')}]` : '',
-    ].filter(Boolean)
-    if (facts.length === 0) return
-    this.#turnLedger.push(`Turn ${this.#turnCount}: ${facts.join(' ')}`)
-    if (this.#turnLedger.length > 10) this.#turnLedger.shift()
-  }
+function transcriptTextLength(transcript: readonly SidecarExchange[]): number {
+  return transcript.reduce((length, exchange) => length + exchange.prompt.length + exchange.replyText.length, 0)
 }
 
 /** Appends the contents not on the list yet, ignoring case, to `targetPhase` as pending tasks and returns them */

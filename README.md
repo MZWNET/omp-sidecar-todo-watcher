@@ -34,7 +34,7 @@ flowchart TB
 
   subgraph Watcher["Sidecar Todo Watcher (Non-blocking background pass)"]
     Gate["1. Dual Watermark Gate<br/>• Write-Burst: edit/write or verification tool executed<br/>• Read-Synthesis: read/grep + >=80 chars analytical conclusion<br/>(0 calls on intermediate file browsing)"]
-    Digest["2. Privacy-Scrubbed Prefix-Aligned Digest (~600 Tokens)<br/>• [Static Prefix] User goal + Master plan + Rules<br/>• [Append-Only Ledger] Past turn summaries (#turnLedger)<br/>• [Turn Tail] AST symbol declarations + Read fingerprints + Exit codes"]
+    Digest["2. Privacy-Scrubbed Append-Only Transcript<br/>• [System Prompt] Every fixed rule, shared by all calls<br/>• [Earlier Exchanges] Replayed unchanged as the cached prefix<br/>• [New Burst Delta] Open todo items + AST symbol declarations + Read fingerprints + Exit codes"]
     Smol["3. Detached Micro-Judge (@smol / @tiny)<br/>completeSimple (disableReasoning: true, temp: 0)<br/>Checks off #id / dynamically appends or drops steps"]
     Veto["4. Deterministic Veto Gates<br/>• Failed test (isError=true) vetoes verification checkoff<br/>• Missing analysis vetoes investigation checkoff"]
   end
@@ -59,8 +59,8 @@ flowchart TB
 3. **Full-File Symbol Declaration Pre-Extraction & Read-Evidence Fingerprints**:
    - Scans `write`/`edit` payloads for all top-level `export function/class/interface/type`, `def`, `fn`, and `test()` declarations (`summarizeCodeChange`), solving the untracked-file empty `git diff` problem and large-file tail truncation.
    - Extracts compact (~120-char) symbol fingerprints from `read`/`grep`/`lsp` results (`summarizeReadEvidence`) paired with a **Read-Synthesis Watermark** (a read plus >= 80 chars of analysis, see `Burst.hasPendingActivity` in `src/watcher/burst.ts`) to accurately evaluate pure investigation/audit tasks.
-4. **Prefix-Aligned Append-Only Micro-Ledger (`#turnLedger`)**:
-   Structures prompts strictly as `[Static Goal & Master Plan] -> [Static Rules] -> [Append-Only Turn Ledger] -> [Current Burst Delta]` with a pinned `sessionId` and `promptCacheKey` to prevent cross-turn amnesia and maximize prefix cache hits.
+4. **Append-Only Sidecar Transcript**:
+   Every rule sits in one fixed system prompt, and each detached call replays the earlier exchanges on the current todo list unchanged before the new burst delta, so every request extends the previous one and prompt caches that only match a whole earlier request (such as DeepSeek's) serve all but the delta. Once the transcript outgrows `maxTranscriptTextLength` (`src/watcher/watcher.ts`), or a call reads none of it from the provider's cache, it starts over from an opening that restates the goal and list; ephemeral turns always send such an opening, since the session model never sees the transcript.
 5. **Privacy & Secret Protection by Default (`redactSecrets` & `isSensitiveFilePath`)**:
    - Automatically blocks content and diff extraction for sensitive files (`.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `*secret*`, `*credential*`, `~/.ssh/*`, `~/.aws/*`).
    - Scrubs API keys (`sk-...`, `ghp_...`, `github_pat_...`, `AKIA...`, `AIza...`, `xoxb-...`), Bearer tokens, JWTs, PEM private keys, and `PASSWORD`/`SECRET`/`TOKEN` assignments before any text is sent to the Sidecar model or written to disk.

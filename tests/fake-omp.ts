@@ -1,4 +1,4 @@
-import type { OmpEventHandlers, OmpExtensionAPI, OmpExtensionContext } from '../src/omp/api.ts'
+import type { OmpEventHandlers, OmpExtensionAPI, OmpExtensionContext, OmpResolvedModel } from '../src/omp/api.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,7 +6,7 @@ import { onTestFinished, vi } from 'vitest'
 import sidecarTodoWatcherExtension from '../src/index.ts'
 import { zeroUsage } from './fake-sidecar.ts'
 
-/** Loads the extension into an in-memory omp host whose session lives in a fresh temporary directory, with the entries the extension appends as its branch. The sidecar answers ephemeral turns from `sidecarReplies` in order */
+/** Loads the extension into an in-memory omp host whose session lives in a fresh temporary directory, with the entries the extension appends as its branch. The sidecar answers ephemeral turns from `sidecarReplies` in order, unless `detachedModel` gives the watcher a detached model to call */
 export interface FakeOmp {
   sessionId: string
   activeTools: string[]
@@ -22,7 +22,12 @@ export interface FakeOmp {
 }
 
 export function createFakeOmp(
-  options: { agent?: OmpExtensionContext['agent']; activeTools?: string[]; gitDiff?: string } = {},
+  options: {
+    agent?: OmpExtensionContext['agent']
+    activeTools?: string[]
+    gitDiff?: string
+    detachedModel?: OmpResolvedModel
+  } = {},
 ): FakeOmp {
   for (const name of ['OMP_PEER_ID', 'OMP_PEER_BROKER_DB', 'OMP_WATCHER_MODEL', 'OMP_WATCHER_MODE']) {
     vi.stubEnv(name, undefined)
@@ -51,8 +56,11 @@ export function createFakeOmp(
       notify: () => {},
     },
     agent: options.agent ?? { kind: 'main', id: 'Main', name: 'main' },
-    models: { resolve: () => undefined },
-    modelRegistry: { getApiKey: async () => undefined, resolveModelHeaders: async () => undefined },
+    models: { resolve: () => options.detachedModel },
+    modelRegistry: {
+      getApiKey: async () => (options.detachedModel ? 'test-api-key' : undefined),
+      resolveModelHeaders: async () => undefined,
+    },
     sessionManager: { getSessionId: () => host.sessionId, getBranch: () => host.entries },
     runEphemeralTurn: async ({ promptText, signal }) => {
       signal?.throwIfAborted()

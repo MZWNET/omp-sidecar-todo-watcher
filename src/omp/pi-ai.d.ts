@@ -1,14 +1,36 @@
 // The subset of omp's host-bundled `@oh-my-pi/pi-ai` that the detached sidecar calls
 declare module '@oh-my-pi/pi-ai' {
+  export interface Usage {
+    input: number
+    output: number
+    cacheRead: number
+    cacheWrite: number
+    totalTokens: number
+    cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number }
+  }
+
+  export interface UserMessage {
+    role: 'user'
+    content: Array<{ type: 'text'; text: string }>
+    timestamp: number
+  }
+
+  export interface AssistantMessage {
+    role: 'assistant'
+    content: Array<{ type: 'text'; text: string }>
+    api: string
+    provider: string
+    model: string
+    usage: Usage
+    stopReason: 'stop'
+    timestamp: number
+  }
+
   export function completeSimple(
     model: { id: string; provider: string },
     context: {
       systemPrompt: string
-      messages: Array<{
-        role: 'user'
-        content: Array<{ type: 'text'; text: string }>
-        timestamp: number
-      }>
+      messages: Array<UserMessage | AssistantMessage>
     },
     options: {
       apiKey: string
@@ -24,13 +46,6 @@ declare module '@oh-my-pi/pi-ai' {
     model: string
     provider: string
     content: Array<{ type: string; text?: string }>
-    usage: {
-      input: number
-      output: number
-      cacheRead: number
-      cacheWrite: number
-      totalTokens: number
-      cost: { total: number }
-    }
+    usage: Usage
   }>
 }

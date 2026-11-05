@@ -1,5 +1,27 @@
+import type { completeSimple } from '@oh-my-pi/pi-ai'
 import { describe, expect, it, onTestFinished, vi } from 'vitest'
+import { sidecarInstructions } from '../src/watcher/prompts.ts'
 import { createFakeOmp } from './fake-omp.ts'
+
+// Only omp provides this module
+const { complete } = vi.hoisted(() => ({ complete: vi.fn<typeof completeSimple>() }))
+vi.mock('@oh-my-pi/pi-ai', () => ({ completeSimple: complete }))
+
+function detachedReply(text: string): Awaited<ReturnType<typeof completeSimple>> {
+  return {
+    model: 'deepseek-flash',
+    provider: 'deepseek',
+    content: [{ type: 'text', text }],
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+  }
+}
 
 describe('sidecar todo watcher extension', () => {
   it('runs the omp lifecycle: plan extraction, checkoff, slash commands, and auto-reset', async () => {
@@ -18,6 +40,8 @@ describe('sidecar todo watcher extension', () => {
     await omp.emit('tool_result', { toolName: 'bash', input: { command: 'bun test' }, content: [], isError: false })
     await omp.emit('turn_end', { message: { content: [] } })
     await vi.waitFor(() => expect(omp.widget?.[0]).toContain('1/2 done · Active (#2): Step 2: Verify config'))
+    // The session model never sees the sidecar transcript, so each ephemeral turn restates the list
+    expect(omp.prompts[1]).toContain('Todo List:\n#1 [in_progress]: Step 1: Create config')
     expect(omp.prompts[1]).toContain("+export const API_KEY = '[REDACTED]'")
     expect(omp.prompts[1]).not.toContain('sk-1234567890')
 
@@ -38,6 +62,31 @@ describe('sidecar todo watcher extension', () => {
 
     await omp.emit('input', { text: 'Start next feature' })
     expect(omp.widget).toBeUndefined()
+  })
+
+  it('replays earlier exchanges to the detached model before each new prompt', async () => {
+    const omp = createFakeOmp({
+      detachedModel: { id: 'deepseek-flash', provider: 'deepseek', api: 'openai-completions' },
+    })
+    const initReply = '{"initTasks": ["Step 1: Create config", "Step 2: Verify config"]}'
+    complete.mockResolvedValueOnce(detachedReply(initReply))
+    complete.mockResolvedValueOnce(detachedReply('{"completedTasks": ["#1"]}'))
+
+    await omp.emit('session_start', {})
+    await omp.emit('turn_end', { message: { content: [] } })
+    await vi.waitFor(() => expect(omp.entries).toHaveLength(1))
+    await omp.emit('tool_result', { toolName: 'write', input: { path: 'src/config.ts' }, content: [], isError: false })
+    await omp.emit('turn_end', { message: { content: [] } })
+    await vi.waitFor(() => expect(complete).toHaveBeenCalledTimes(2))
+
+    const [opening, followUp] = complete.mock.calls.map(([, context]) => context)
+    expect(followUp?.systemPrompt).toBe(sidecarInstructions)
+    expect(followUp?.messages.map(message => [message.role, message.content[0]?.text])).toEqual([
+      ['user', opening?.messages[0]?.content[0]?.text],
+      ['assistant', initReply],
+      ['user', expect.stringContaining('Modified files: src/config.ts')],
+    ])
+    expect(omp.prompts).toHaveLength(0)
   })
 
   it('restores the list saved at the branch point it navigates back to', async () => {

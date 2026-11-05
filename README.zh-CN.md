@@ -34,7 +34,7 @@ flowchart TB
 
   subgraph Watcher["旁路盯梢协程 (SidecarTodoWatcher — 非阻塞后台运行)"]
     Gate["1. 双水位线门禁 (Dual Watermark Gate)<br/>• 写脉冲：发生 edit/write 或验证调用<br/>• 读合成：发生 read/grep 且当轮输出 >=80 字分析结论<br/>（纯中间态翻找文件保持 0 调用静默）"]
-    Digest["2. 隐私脱敏前缀对齐微摘要 (~600 Tokens)<br/>• [静态前缀] 原始需求 + 总计划 + 规则<br/>• [只追加账本] 历史 Turn 摘要 (#turnLedger)<br/>• [当轮尾部] 全文件符号声明 (Declarations) + 阅读指纹 + 工具退出码"]
+    Digest["2. 隐私脱敏的只追加对话记录<br/>• [System Prompt] 全部固定规则，所有调用共用<br/>• [历史往返] 原样重放，作为缓存前缀<br/>• [当轮增量] 未完成的 Todo + 全文件符号声明 (Declarations) + 阅读指纹 + 工具退出码"]
     Smol["3. 独立轻量小模型直调 (@smol / @tiny)<br/>completeSimple (disableReasoning: true, temp: 0)<br/>自动勾选 #id / 动态追加或废弃步骤"]
     Veto["4. 确定性一票否决门禁 (Deterministic Veto)<br/>• 测试命令失败 (isError=true) 严禁勾选验证项<br/>• 无实质结论严禁勾选纯调研项"]
   end
@@ -59,8 +59,8 @@ flowchart TB
 3. **全文件符号声明预提取（`summarizeCodeChange`）与阅读微指纹（`summarizeReadEvidence`）**：
    - 直接从 `write`/`edit` 工具载荷中扫描全文件 `export function/class/interface/type`、`def`、`fn`、`test()` 声明行，解决新建未 `git add` 文件 `git diff` 为空及长文件尾部截断盲区；
    - 从 `read`/`grep`/`lsp` 输出中提取 ~120 字符符号指纹，配合“读脉冲 + 结论合成（$\ge 80$ 字）”水位线，精准支持纯阅读/调查分析类 Todo。
-4. **前缀对齐的只追加微型账本（Prefix-Aligned `#turnLedger`）**：
-   严格按照 `[静态目标与总计划] -> [静态规则] -> [只追加历史轮次账本] -> [当轮增量]` 构造 Prompt，并绑定固定 `sessionId` 与 `promptCacheKey`，消除跨轮次失忆并最大化前缀缓存复用。
+4. **只追加的旁路对话记录（Append-Only Transcript）**：
+   所有固定规则都放在同一个 system prompt 中；每次 detached 调用先原样重放当前 Todo 列表下的历史往返，再追加当轮增量，让每个请求都完整延续上一个请求，只匹配完整历史请求的前缀缓存（如 DeepSeek）也能命中除当轮增量外的全部内容。对话记录超过 `maxTranscriptTextLength`（`src/watcher/watcher.ts`），或某次调用完全没有从 provider 缓存中读到它时，会从重述目标与列表的开场消息重新开始；ephemeral 调用因为主模型看不到对话记录，始终发送这样的开场消息。
 5. **默认隐私与凭据安全保护（`redactSecrets` & `isSensitiveFilePath`）**：
    - 自动阻断对敏感路径（`.env*`、`*.pem`、`*.key`、`id_rsa*`、`id_ed25519*`、`.npmrc`、`.netrc`、`*secret*`、`*credential*`、`~/.ssh/*`、`~/.aws/*`）的文件内容提取与 `git diff` 采集；
    - 在向旁路模型发送任何文本或写入 SQLite 前，自动对 API Key（`sk-...`、`ghp_...`、`github_pat_...`、`AKIA...`、`AIza...`、`xoxb-...`）、Bearer Token、JWT、PEM 私钥块及密码赋值语句执行正则脱敏；

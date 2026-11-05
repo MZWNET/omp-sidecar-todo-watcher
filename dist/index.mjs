@@ -767,6 +767,75 @@ function renderTask(task, theme) {
 		case "pending": return theme.fg("muted", `[ ] ${task.id} ${task.content}`);
 	}
 }
+// src/watcher/prompts.ts
+/** Every fixed rule lives in the system prompt, so all sidecar calls share it as the start of their cached prefix */
+const sidecarInstructions = [
+	"You are a fast, deterministic JSON-only code-progress judge for a coding agent's todo list. Each user message reports the agent's activity since the previous one. Do not think or explain; output ONLY a raw JSON object starting with '{' and ending with '}'.",
+	"",
+	"[WHEN THERE IS NO TODO LIST YET]",
+	"Extract 2 to 6 concrete, verifiable engineering todo items in execution order (`initTasks` array).",
+	"If any step is ALREADY fully implemented/verified by the reported tool actions, list its 1-based ID (e.g. \"#1\") in `completedTasks`.",
+	"Reply format: {\"initTasks\": [\"step 1\", \"step 2\"], \"completedTasks\": [\"#1\"], \"milestoneSummary\": null, \"exportedSymbolsChanged\": []}",
+	"",
+	"[EVALUATION RULES FOR AN EXISTING TODO LIST]",
+	"1. Mark an open item in `completedTasks` (by ID like \"#1\") ONLY if every function/requirement named in that item is implemented and verified in the reported code/actions.",
+	"2. For investigation/analysis/audit items (e.g. 'Analyze X', 'Locate root cause'), mark completed ONLY if the target files were read AND the 'Main Agent Notes & Analytical Findings' contain the concrete analytical conclusion/findings (or the agent has already moved on to implementing the fix).",
+	"3. Never mark a test/verification item completed if the test command has not run yet or failed.",
+	"4. If the user added new requirements, list in `appendTasks`; if an item is obsolete, list in `dropTasks`.",
+	"5. If shared exports/signatures changed or a key investigation finding affects peers, write a 1-sentence `milestoneSummary` and list `exportedSymbolsChanged`.",
+	"Reply format: {\"completedTasks\": [\"#1\"], \"appendTasks\": [], \"dropTasks\": [], \"milestoneSummary\": null, \"exportedSymbolsChanged\": []}"
+].join("\n");
+/** The first message of a transcript, carrying the task context the sidecar has not seen yet */
+function buildOpeningPrompt(context) {
+	const lines = [
+		"[TASK CONTEXT]",
+		`User Goal: ${context.userGoal || "(infer from the activity below)"}`,
+		...todoListLines(context.phases)
+	];
+	if (context.phases.length > 0) lines.push(`Investigated/Read files so far: ${[...context.cumulativeReadFiles].join(", ") || "(none)"}`, `Modified files so far: ${[...context.cumulativeTouchedFiles].join(", ") || "(none)"}`);
+	return [
+		...lines,
+		"",
+		...activityLines(context.burst, context.diff)
+	].join("\n");
+}
+/** A later message of a transcript: what changed since the sidecar's previous reply */
+function buildFollowUpPrompt(context) {
+	const { burst } = context;
+	return [
+		...burst.userPrompted ? [`New user message: ${context.userPrompt}`] : [],
+		...openTodoLines(context.phases),
+		"",
+		...activityLines(burst, context.diff)
+	].join("\n");
+}
+function todoListLines(phases) {
+	const tasks = allTasks(phases);
+	if (tasks.length === 0) return ["Todo List: (none yet)"];
+	return ["Todo List:", ...tasks.map(taskLine)];
+}
+/** The finished items already sit earlier in the transcript */
+function openTodoLines(phases) {
+	const tasks = allTasks(phases);
+	if (tasks.length === 0) return ["Todo List: (none yet)"];
+	const openTasks = tasks.filter(isOpen);
+	return openTasks.length > 0 ? ["Open Todo Items:", ...openTasks.map(taskLine)] : ["Open Todo Items: (none)"];
+}
+function taskLine(task) {
+	return `${task.id} [${task.status}]: ${task.content}`;
+}
+function activityLines(burst, diff) {
+	const lines = [];
+	if (burst.assistantNotes.length > 0) lines.push("Main Agent Notes & Analytical Findings:", ...burst.assistantNotes);
+	if (burst.readEvidence.length > 0) lines.push("Files & symbols inspected:", ...bullets(burst.readEvidence));
+	if (burst.toolActions.length > 0) lines.push("Executed tool actions:", ...bullets(burst.toolActions));
+	if (burst.touchedFiles.size > 0) lines.push(`Modified files: ${[...burst.touchedFiles].join(", ")}`);
+	if (diff.trim()) lines.push("On-disk git diff snippet:", "```diff", diff.trim().slice(0, 3e3), "```");
+	return ["[AGENT ACTIVITY]", ...lines.length > 0 ? lines : ["(none)"]];
+}
+function bullets(items) {
+	return items.map((item) => `- ${item}`);
+}
 // src/omp/runner.ts
 const watcherModeSchema = /* @__PURE__ */ picklist([
 	"auto",
@@ -782,7 +851,20 @@ const detachedModelSpecs = [
 	"deepseek-flash",
 	"claude-haiku-4-5"
 ];
-const detachedSystemPrompt = "You are a fast, deterministic JSON-only code-progress judge. Do not think or explain; output ONLY a raw JSON object starting with '{' and ending with '}'.";
+const zeroUsage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		total: 0
+	}
+};
 function isWatcherMode(value) {
 	return /* @__PURE__ */ is(watcherModeSchema, value);
 }
@@ -797,10 +879,10 @@ function resolveDetachedModel(ctx, settings) {
 }
 /** Prefers a Detached Micro-Judge on a cheap/fast model (@smol / @tiny / deepseek-flash) and, outside `detached` mode, falls back to a Shared-Cache Ephemeral Turn on the active session model */
 function createSidecarRunner(ctx, settings) {
-	return async (promptText, signal) => {
+	return async (request, signal) => {
 		const model = resolveDetachedModel(ctx, settings);
 		if (model) {
-			const reply = await askDetached(ctx, model, promptText, signal).catch((error) => {
+			const reply = await askDetached(ctx, model, request, signal).catch((error) => {
 				if (settings.mode === "detached") throw error;
 			});
 			if (reply) return reply;
@@ -808,7 +890,7 @@ function createSidecarRunner(ctx, settings) {
 		if (settings.mode === "detached") throw new Error("No detached sidecar model replied");
 		if (!ctx.runEphemeralTurn) throw new Error("No sidecar watcher runner available");
 		const { replyText, assistantMessage } = await ctx.runEphemeralTurn({
-			promptText,
+			promptText: `${sidecarInstructions}\n\n${request.prompt}`,
 			minimizeEffort: true,
 			signal
 		});
@@ -820,22 +902,15 @@ function createSidecarRunner(ctx, settings) {
 		};
 	};
 }
-async function askDetached(ctx, model, promptText, signal) {
+async function askDetached(ctx, model, request, signal) {
 	const complete = await loadCompleteSimple();
 	const apiKey = await ctx.modelRegistry.getApiKey(model);
 	if (!complete || apiKey === void 0 || apiKey === "") return void 0;
 	const headers = await ctx.modelRegistry.resolveModelHeaders(model, signal);
 	const cacheKey = `${ctx.sessionManager.getSessionId()}:detached-watcher`;
 	const message = await complete(model, {
-		systemPrompt: detachedSystemPrompt,
-		messages: [{
-			role: "user",
-			content: [{
-				type: "text",
-				text: promptText
-			}],
-			timestamp: Date.now()
-		}]
+		systemPrompt: sidecarInstructions,
+		messages: [...request.transcript.flatMap((exchange) => [userMessage(exchange.prompt), assistantMessage(model, exchange.replyText)]), userMessage(request.prompt)]
 	}, {
 		apiKey,
 		headers,
@@ -847,13 +922,39 @@ async function askDetached(ctx, model, promptText, signal) {
 		signal
 	});
 	signal?.throwIfAborted();
-	const replyText = message.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n").trim();
-	if (!replyText) return void 0;
+	const replyText = message.content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
+	if (!replyText.trim()) return void 0;
 	return {
 		replyText,
 		mode: "detached-smol",
 		modelId: `${message.provider}/${message.model}`,
 		usage: message.usage
+	};
+}
+function userMessage(text) {
+	return {
+		role: "user",
+		content: [{
+			type: "text",
+			text
+		}],
+		timestamp: Date.now()
+	};
+}
+/** An earlier reply in the form pi-ai returns one from `model` */
+function assistantMessage(model, text) {
+	return {
+		role: "assistant",
+		content: [{
+			type: "text",
+			text
+		}],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: zeroUsage,
+		stopReason: "stop",
+		timestamp: Date.now()
 	};
 }
 let completeSimplePromise;
@@ -3337,59 +3438,6 @@ function pushRecent(items, item, limit) {
 	items.push(item);
 	if (items.length > limit) items.shift();
 }
-// src/watcher/prompts.ts
-function buildInitPrompt(context) {
-	const { burst, diff } = context;
-	const lines = [
-		"[TASK CONTEXT]",
-		`User Goal: ${context.userGoal || "(infer from actions below)"}`,
-		"",
-		"[INSTRUCTIONS]",
-		"Extract 2 to 6 concrete, verifiable engineering todo items in execution order (`initTasks` array).",
-		"If any step is ALREADY fully implemented/verified by the completed tool actions below, list its 1-based ID (e.g. \"#1\") in `completedTasks`.",
-		"Output ONLY raw JSON starting with '{' and ending with '}':",
-		"{\"initTasks\": [\"step 1\", \"step 2\"], \"completedTasks\": [\"#1\"], \"milestoneSummary\": null, \"exportedSymbolsChanged\": []}",
-		"",
-		"[TURN 1 DELTA]"
-	];
-	if (burst.assistantNotes.length > 0) lines.push("Main Agent Turn Summary & Findings:", ...burst.assistantNotes);
-	if (burst.readEvidence.length > 0) lines.push("Investigated files & symbols read in this turn:", ...bullets(burst.readEvidence));
-	if (burst.toolActions.length > 0) lines.push("Completed tool actions in this turn:", ...bullets(burst.toolActions));
-	if (burst.touchedFiles.size > 0) lines.push(`Modified files in this turn: ${[...burst.touchedFiles].join(", ")}`);
-	if (diff.trim()) lines.push("On-disk git diff snippet:", "```diff", diff.trim().slice(0, 2e3), "```");
-	return lines.join("\n");
-}
-function buildDeltaPrompt(context) {
-	const { burst, diff } = context;
-	const tasks = allTasks(context.phases);
-	const burstFiles = [...burst.touchedFiles];
-	const openList = tasks.filter(isOpen).map((task) => `${task.id} [${task.status}]: ${task.content}`).join("\n");
-	const sections = [
-		"[STATIC TASK CONTEXT]",
-		`Original User Goal: ${context.userGoal || "(see plan below)"}`,
-		"Master Todo Plan:",
-		tasks.map((task) => `${task.id}: ${task.content}`).join("\n"),
-		"",
-		"[EVALUATION RULES]",
-		"1. Mark an open item in `completedTasks` (by ID like \"#1\") ONLY if every function/requirement named in that item is implemented and verified in the code/actions below.",
-		"2. For investigation/analysis/audit items (e.g. 'Analyze X', 'Locate root cause'), mark completed ONLY if the target files were read AND the 'Main Agent Latest Turn Notes' below contain the concrete analytical conclusion/findings (or the agent has already moved on to implementing the fix).",
-		"3. Never mark a test/verification item completed if the test command has not run yet or failed.",
-		"4. If the user added new requirements, list in `appendTasks`; if an item is obsolete, list in `dropTasks`.",
-		"5. If shared exports/signatures changed or a key investigation finding affects peers, write a 1-sentence `milestoneSummary` and list `exportedSymbolsChanged`.",
-		"6. Output ONLY raw JSON starting with '{' and ending with '}':",
-		"{\"completedTasks\": [\"#1\"], \"appendTasks\": [], \"dropTasks\": [], \"milestoneSummary\": null, \"exportedSymbolsChanged\": []}"
-	];
-	if (context.turnLedger.length > 0) sections.push("", "[PAST TURN LEDGER]", ...context.turnLedger);
-	sections.push("", "[CURRENT BURST DELTA]", `Open Todo Items:\n${openList || "(none)"}`, `Investigated/Read files so far: ${[...context.cumulativeReadFiles].join(", ") || "(none)"}`, `Modified files in this burst: ${burstFiles.length > 0 ? burstFiles.join(", ") : "(none)"} (cumulative: ${[...context.cumulativeTouchedFiles].join(", ") || "none"})`);
-	if (burst.readEvidence.length > 0) sections.push("Files & symbols inspected in this burst:", ...bullets(burst.readEvidence));
-	if (burst.assistantNotes.length > 0) sections.push("Main Agent Latest Turn Notes & Analytical Findings:", ...burst.assistantNotes);
-	if (burst.toolActions.length > 0) sections.push("Executed tool actions in this burst:", ...bullets(burst.toolActions));
-	if (diff.trim()) sections.push("On-disk git diff snippet:", "```diff", diff.trim().slice(0, 3e3), "```");
-	return sections.join("\n");
-}
-function bullets(items) {
-	return items.map((item) => `- ${item}`);
-}
 // src/watcher/telemetry.ts
 function createUsageTelemetry() {
 	return {
@@ -3461,6 +3509,8 @@ function parseSidecarVerdict(replyText) {
 }
 // src/watcher/watcher.ts
 const maxStopBlocks = 3;
+/** Long enough for a prefix cache to serve most of a long list, short enough to bound what one cache miss re-bills */
+const maxTranscriptTextLength = 96e3;
 const verificationTaskPattern = /\b(?:bun\s+test|npm\s+test|pnpm\s+test|vitest|jest|pytest|cargo\s+test|go\s+test|tsc|typecheck|lint)\b|运行.*测试|跑通.*测试|验证通过/i;
 const investigationTaskPattern = /\b(?:investigate|analyze|audit|inspect|research|locate|find|diagnose|review|check|understand)\b|调研|分析|排查|审计|定位|检查|阅读|梳理|诊断/i;
 /**
@@ -3475,8 +3525,7 @@ var SidecarTodoWatcher = class {
 	#burst = new Burst();
 	#cumulativeReadFiles = /* @__PURE__ */ new Set();
 	#cumulativeTouchedFiles = /* @__PURE__ */ new Set();
-	#turnLedger = [];
-	#turnCount = 0;
+	#transcript = [];
 	#userGoal = "";
 	#pendingTailNotices = [];
 	#stopBlockCount = 0;
@@ -3583,25 +3632,24 @@ var SidecarTodoWatcher = class {
 	async runPass(runner, options = {}) {
 		const { force = false } = options;
 		if (!force && !this.isPassDue) return false;
-		this.#turnCount++;
 		const initializing = this.#phases.length === 0;
 		const burst = this.#burst;
 		this.#burst = new Burst();
 		const diff = [...burst.codeSnippets, options.gitDiff ?? ""].filter(Boolean).join("\n");
-		const promptText = initializing ? buildInitPrompt({
-			userGoal: this.#userGoal,
-			burst,
-			diff
-		}) : buildDeltaPrompt({
+		const prompt = this.#transcript.length === 0 ? buildOpeningPrompt({
 			userGoal: this.#userGoal,
 			phases: this.#phases,
-			turnLedger: this.#turnLedger,
 			cumulativeReadFiles: this.#cumulativeReadFiles,
 			cumulativeTouchedFiles: this.#cumulativeTouchedFiles,
 			burst,
 			diff
+		}) : buildFollowUpPrompt({
+			userPrompt: this.#userGoal,
+			phases: this.#phases,
+			burst,
+			diff
 		});
-		const verdict = await this.#askSidecar(runner, initializing ? "init" : "delta", promptText, options.signal);
+		const verdict = await this.#askSidecar(runner, initializing ? "init" : "delta", prompt, options.signal);
 		if (!verdict) return false;
 		const initTasks = initializing ? verdict.initTasks ?? [] : [];
 		if (initializing) {
@@ -3615,7 +3663,6 @@ var SidecarTodoWatcher = class {
 			}]);
 		}
 		const completed = this.#transitionOpenTasks(verdict.completedTasks, "completed", (task) => !isCompletionVetoed(task, burst, force));
-		this.#appendLedgerEntry(burst, completed);
 		const dropped = initializing ? [] : this.#transitionOpenTasks(verdict.dropTasks, "abandoned");
 		const appended = initializing ? [] : appendNewTasks(this.#phases, this.#phases.at(-1), verdict.appendTasks ?? []);
 		const changed = initializing || completed.length > 0 || dropped.length > 0 || appended.length > 0;
@@ -3657,7 +3704,7 @@ var SidecarTodoWatcher = class {
 		this.#burst = new Burst();
 		this.#cumulativeReadFiles.clear();
 		this.#cumulativeTouchedFiles.clear();
-		this.#turnLedger = [];
+		this.#transcript = [];
 		this.#stopBlockCount = 0;
 		this.#updatePhases(phases);
 	}
@@ -3695,9 +3742,13 @@ var SidecarTodoWatcher = class {
 		this.#pendingTailNotices = [];
 		return context || void 0;
 	}
-	async #askSidecar(runner, kind, promptText, signal) {
+	async #askSidecar(runner, kind, prompt, signal) {
+		const transcript = this.#transcript;
 		const startedAt = performance.now();
-		const reply = await runner(promptText, signal);
+		const reply = await runner({
+			transcript,
+			prompt
+		}, signal);
 		recordSidecarCall(this.telemetry, {
 			kind,
 			mode: reply.mode,
@@ -3705,7 +3756,21 @@ var SidecarTodoWatcher = class {
 			usage: reply.usage,
 			durationMs: performance.now() - startedAt
 		});
-		return parseSidecarVerdict(reply.replyText);
+		const verdict = parseSidecarVerdict(reply.replyText);
+		if (verdict && reply.mode === "detached-smol") this.#recordExchange(transcript, {
+			prompt,
+			replyText: reply.replyText
+		}, reply.usage);
+		return verdict;
+	}
+	/** Extends `transcript` with the exchange, or starts the list's transcript over when resending it stops paying off */
+	#recordExchange(transcript, exchange, usage) {
+		if (transcript.length > 0 && usage.cacheRead === 0) {
+			this.#transcript = [];
+			return;
+		}
+		transcript.push(exchange);
+		if (transcriptTextLength(transcript) > maxTranscriptTextLength) this.#transcript = [];
 	}
 	/** Moves open tasks named by the sidecar to `status`, returning their contents */
 	#transitionOpenTasks(tokens = [], status, isAllowed = () => true) {
@@ -3716,18 +3781,10 @@ var SidecarTodoWatcher = class {
 		}
 		return transitioned;
 	}
-	#appendLedgerEntry(burst, completed) {
-		const facts = [
-			burst.touchedFiles.size > 0 ? `files=[${[...burst.touchedFiles].join(",")}]` : "",
-			burst.readEvidence.length > 0 ? `investigated=[${burst.readEvidence.slice(0, 3).join("; ")}]` : "",
-			burst.toolActions.length > 0 ? `actions=[${burst.toolActions.slice(0, 3).join("; ")}]` : "",
-			completed.length > 0 ? `completed=[${completed.join("; ")}]` : ""
-		].filter(Boolean);
-		if (facts.length === 0) return;
-		this.#turnLedger.push(`Turn ${this.#turnCount}: ${facts.join(" ")}`);
-		if (this.#turnLedger.length > 10) this.#turnLedger.shift();
-	}
 };
+function transcriptTextLength(transcript) {
+	return transcript.reduce((length, exchange) => length + exchange.prompt.length + exchange.replyText.length, 0);
+}
 /** Appends the contents not on the list yet, ignoring case, to `targetPhase` as pending tasks and returns them */
 function appendNewTasks(phases, targetPhase, contents) {
 	const knownContents = new Set(allTasks(phases).map((task) => task.content.toLowerCase()));

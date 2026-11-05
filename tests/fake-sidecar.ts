@@ -1,5 +1,5 @@
 import type { ModelTokenUsage } from '../src/watcher/telemetry.ts'
-import type { SidecarRunner } from '../src/watcher/watcher.ts'
+import type { SidecarRequest, SidecarRunner } from '../src/watcher/watcher.ts'
 
 export const zeroUsage: ModelTokenUsage = {
   input: 0,
@@ -10,18 +10,18 @@ export const zeroUsage: ModelTokenUsage = {
   cost: { total: 0 },
 }
 
-/** A sidecar that answers each call with the next reply (JSON-encoded unless a string) and records its prompts */
-export function fakeSidecar(...replies: Array<object | string>): { runner: SidecarRunner; prompts: string[] } {
-  const prompts: string[] = []
-  const runner: SidecarRunner = async promptText => {
-    prompts.push(promptText)
+/** A detached sidecar that answers each call with the next reply (JSON-encoded unless a string), serves replayed exchanges from its prompt cache, and records the requests it was sent */
+export function fakeSidecar(...replies: Array<object | string>): { runner: SidecarRunner; requests: SidecarRequest[] } {
+  const requests: SidecarRequest[] = []
+  const runner: SidecarRunner = async ({ transcript, prompt }) => {
+    requests.push({ transcript: [...transcript], prompt })
     const reply = replies.shift() ?? {}
     return {
       replyText: typeof reply === 'string' ? reply : JSON.stringify(reply),
-      mode: 'ephemeral-shared-cache',
+      mode: 'detached-smol',
       modelId: 'test/sidecar',
-      usage: zeroUsage,
+      usage: { ...zeroUsage, cacheRead: transcript.length > 0 ? 1024 : 0 },
     }
   }
-  return { runner, prompts }
+  return { runner, requests }
 }
