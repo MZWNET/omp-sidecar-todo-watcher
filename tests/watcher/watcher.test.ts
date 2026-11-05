@@ -222,7 +222,7 @@ describe('sidecarTodoWatcher', () => {
     expect(reasons[3]).toBeUndefined()
   })
 
-  it('starts a fresh list and transcript when a new prompt follows a finished one (#41359)', async () => {
+  it('archives a finished list and starts a fresh list and transcript on a new prompt (#41359)', async () => {
     const watcher = createWatcher(createBroker(), 'peer-alive', ['Step A'])
     const sidecar = fakeSidecar({ completedTasks: ['#1'] }, { initTasks: ['Add the billing webhook route'] })
     watcher.onToolResult({ toolName: 'edit', input: { path: 'src/a.ts' }, isError: false })
@@ -230,10 +230,25 @@ describe('sidecarTodoWatcher', () => {
 
     expect(watcher.onUserInput('Now build the billing webhook handler')).toEqual({ clearedFinishedList: true })
     expect(watcher.phases).toHaveLength(0)
+    expect(watcher.archivedBatches).toEqual([
+      [{ name: 'Tasks', tasks: [{ id: '#1', content: 'Step A', status: 'completed' }] }],
+    ])
 
     await watcher.runPass(sidecar.runner)
     expect(sidecar.requests[1]?.transcript).toEqual([])
     expect(sidecar.requests[1]?.prompt).toContain('User Goal: Now build the billing webhook handler')
+  })
+
+  it('archives the list a reset clears, but not an empty one', () => {
+    const watcher = createWatcher(createBroker(), 'peer-reset', ['Step A'])
+
+    watcher.resetTodos()
+    watcher.resetTodos()
+
+    expect(watcher.phases).toHaveLength(0)
+    expect(watcher.archivedBatches).toEqual([
+      [{ name: 'Tasks', tasks: [{ id: '#1', content: 'Step A', status: 'in_progress' }] }],
+    ])
   })
 
   it('vetoes checking off a verification task after a failed test run', async () => {

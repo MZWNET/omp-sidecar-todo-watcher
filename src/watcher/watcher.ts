@@ -69,6 +69,7 @@ export class SidecarTodoWatcher {
   paused = false
   readonly #broker: PeerSyncBroker
   #phases: TodoPhase[] = []
+  readonly #archivedBatches: TodoPhase[][] = []
   #burst = new Burst()
   readonly #cumulativeReadFiles = new Set<string>()
   readonly #cumulativeTouchedFiles = new Set<string>()
@@ -85,6 +86,11 @@ export class SidecarTodoWatcher {
 
   get phases(): readonly TodoPhase[] {
     return this.#phases
+  }
+
+  /** Earlier lists, oldest first, kept when a new prompt replaces a finished list or `resetTodos` clears one */
+  get archivedBatches(): readonly (readonly TodoPhase[])[] {
+    return this.#archivedBatches
   }
 
   /** Whether `runPass` without `force` would consult the sidecar */
@@ -112,19 +118,20 @@ export class SidecarTodoWatcher {
   }
 
   resetTodos(): void {
+    if (this.#phases.length > 0) this.#archivedBatches.push(this.#phases)
     this.#startList([])
   }
 
   /**
    * Handles a new user prompt (`input` event):
-   * - If all existing todos were already completed/abandoned, clears the list so Turn 1 of the new prompt extracts a fresh Todo list (solving #41359)
+   * - If all existing todos were already completed/abandoned, archives and clears the list so Turn 1 of the new prompt extracts a fresh Todo list (solving #41359)
    * - Otherwise flags the prompt so mid-task scope additions can be extracted
    */
   onUserInput(text: string): { clearedFinishedList: boolean } {
     const prompt = text.trim()
     if (!prompt || prompt.startsWith('/')) return { clearedFinishedList: false }
     const clearedFinishedList = this.#phases.length > 0 && this.incompleteTasks.length === 0
-    if (clearedFinishedList) this.#startList([])
+    if (clearedFinishedList) this.resetTodos()
     this.#stopBlockCount = 0
     this.#burst.userPrompted = true
     this.#userGoal = redactSecrets(prompt).slice(0, 1200)
