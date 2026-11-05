@@ -2,34 +2,55 @@
   "name": "omp-sidecar-todo-watcher",
   "version": "1.0.0",
   "description": "Zero-friction Sidecar Todo Watcher & Cross-Session Peer Sync Broker plugin for Oh My Pi (omp)",
-  "license": "MIT",
-  "type": "module",
-  "main": "./src/index.ts",
+  "keywords": [
+    "multi-agent",
+    "oh-my-pi",
+    "omp",
+    "omp-plugin",
+    "peer-sync",
+    "todo"
+  ],
   "homepage": "https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher#readme",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher.git"
   },
+  "type": "module",
+  "main": "./dist/index.mjs",
   "scripts": {
-    "test": "bun test"
+    "build": "tsdown",
+    "test": "vitest run",
+    "typecheck": "tsc",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix"
+  },
+  "devDependencies": {
+    "@mzwing/oxc-config": "^0.1.6",
+    "@types/node": "^26.6.6",
+    "@types/picomatch": "^4.0.3",
+    "oxfmt": "^0.76.0",
+    "oxlint": "^1.91.0",
+    "oxlint-tsgolint": "^7.0.2005",
+    "picomatch": "^4.0.7",
+    "tsdown": "^0.23.5",
+    "typescript": "^7.0.2",
+    "valibot": "^1.5.0",
+    "vitest": "^5.1.0"
+  },
+  "engines": {
+    "bun": ">=1.4.4"
   },
   "omp": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.mjs"
     ]
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.mjs"
     ]
-  },
-  "keywords": [
-    "omp",
-    "oh-my-pi",
-    "omp-plugin",
-    "todo",
-    "multi-agent",
-    "peer-sync"
-  ],
-  "packageManager": "pnpm@12.17.0"
+  }
 }

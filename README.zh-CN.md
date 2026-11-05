@@ -52,7 +52,7 @@ flowchart TB
 
 ### 六大核心机制
 
-1. **主模型 `todo` 物理剥离（`stripTodoFromTools`）**：
+1. **主模型 `todo` 物理剥离**：
    在 `session_start` 时从主模型激活工具集中移除 `"todo"`，自动静默原生 `omp` 滞后的内置催促器，主模型 100% 算力用于写代码。
 2. **非阻塞异步审阅（Zero Critical-Path Latency）**：
    在 `turn_end` 中通过受管定时器 `ctx.setTimeout(..., 0)` 脱离主事件循环关键路径，让旁路小模型与主模型的下一轮推理 **100% 并发执行**；并在发起网络请求前执行**原子快照清零**与 `rerunRequested` 合并队列，杜绝异步窗口期的丢失更新（Lost Update）。
@@ -66,7 +66,7 @@ flowchart TB
    - 在向旁路模型发送任何文本或写入 SQLite 前，自动对 API Key（`sk-...`、`ghp_...`、`github_pat_...`、`AKIA...`、`AIza...`、`xoxb-...`）、Bearer Token、JWT、PEM 私钥块及密码赋值语句执行正则脱敏；
    - 数据库目录与文件强制启用 `0700` / `0600` 仅属主可读写权限。
 6. **跨进程平级协同总线（`PeerSyncBroker`）**：
-   - 基于 `bun:sqlite` WAL 模式，自动追踪同一仓库下所有活跃 `omp` 进程的 `PID`、`ReadSet` 与 `WriteSet`（自动通过 `process.kill(pid, 0)` + 15 分钟 TTL 清理崩溃僵尸节点）；
+   - 基于 `node:sqlite` WAL 模式，自动追踪同一仓库下所有活跃 `omp` 进程的 `PID`、`ReadSet` 与 `WriteSet`（自动通过 `process.kill(pid, 0)` + 15 分钟 TTL 清理崩溃僵尸节点）；
    - 当节点 A 修改了节点 B 曾读取过的文件或更新了导出符号时，在节点 B 的下一个 `tool_result` 边界自动注入零寒暄（Zero-ACK）的 `<peer-sync>` 卡片；当两个平级节点同时修改同一文件时，立即向双方注入 `kind="write_conflict"` 告警。
 
 ---
@@ -149,6 +149,8 @@ xychart-beta
 
 ## 4. 安装与启用方式
 
+需要 `omp` 18.13 或更新版本，其运行时满足 `package.json` 中 `engines.bun` 的版本范围。
+
 ### 方式一：通过 `omp` Marketplace 安装（推荐）
 
 ```bash
@@ -216,8 +218,12 @@ omp -e ~/.omp/plugins/omp-sidecar-todo-watcher
 ## 开发与测试
 
 ```bash
-bun test
+bun install
+bun run test
+bun run build
 ```
+
+`omp` 通过复制仓库来安装插件，所以构建出的 `dist/` 需要提交进仓库。devenv 的 pre-commit hook 会在提交源码时自动重新构建它。
 
 ## License
 

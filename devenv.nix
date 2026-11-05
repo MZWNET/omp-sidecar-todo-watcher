@@ -1,5 +1,4 @@
 {
-  config,
   inputs,
   lib,
   pkgs,
@@ -10,13 +9,13 @@
   languages = {
     javascript = {
       enable = true;
-      package = pkgs.node-bin.lts;
-      nodejs.enable = true;
-      pnpm = {
+      nodejs.enable = false;
+      # Requires Node.js; languages.typescript.lsp provides the same server
+      lsp.enable = false;
+      bun = {
         enable = true;
-        package = lib.defaultTo pkgs.pnpm-bin.latest (pkgs.pnpm-bin.fromProject ./.);
+        package = lib.defaultTo pkgs.bun-bin.latest (pkgs.bun-bin.fromProject ./.);
       };
-      lsp.enable = true;
     };
     typescript = {
       enable = true;
@@ -24,17 +23,33 @@
     };
   };
 
-  scripts.pnpm-up.exec = let
-    major = lib.versions.major config.languages.javascript.pnpm.package.version;
-    latestInMajor = pkgs.pnpm-bin.majors.${major};
-  in ''
-    pnpm pkg set packageManager=pnpm@${latestInMajor.version}
-    # The wrapper's pm-on-fail=ignore skips recording the pin in pnpm-lock.yaml; running the pinned version avoids pnpm downloading itself
-    ${lib.getExe latestInMajor} install --lockfile-only --pm-on-fail=download
-  '';
+  # The tools run on the whole project because they reject explicitly passed files that their ignore rules exclude
+  git-hooks.hooks = {
+    format = {
+      enable = true;
+      name = "oxfmt";
+      entry = "bun run format";
+      pass_filenames = false;
+    };
+    lint = {
+      enable = true;
+      name = "oxlint";
+      entry = "bun run lint:fix";
+      files = "\\.[cm]?[jt]sx?$";
+      pass_filenames = false;
+    };
+    # omp installs plugins by copying the repository, so the committed dist/ must match src/
+    build-dist = {
+      enable = true;
+      name = "Build dist";
+      entry = "bun run build";
+      files = "^(src/|package\\.json$|bun\\.lock$|tsdown\\.config\\.ts$)";
+      pass_filenames = false;
+      after = ["format" "lint"];
+    };
+  };
 
   enterTest = ''
-    node --version
-    pnpm --version
+    bun --version
   '';
 }

@@ -52,13 +52,13 @@ flowchart TB
 
 ### Key Mechanisms
 
-1. **Zero Administrative Tax on the Main Model (`stripTodoFromTools`)**:
+1. **Zero Administrative Tax on the Main Model**:
    Strips `"todo"` from the primary model's active tool list at `session_start`, automatically silencing built-in mid-run nudges and saving ~800 tokens of tool schema per turn.
 2. **Non-Blocking Background Execution**:
    Dispatches sidecar evaluation off the critical path at `turn_end` via `ctx.setTimeout(..., 0)` so the primary model starts its next turn with **0 ms added latency**. Counters are snapshotted and cleared atomically before network I/O with a coalesced `rerunRequested` queue to prevent Lost Update anomalies.
 3. **Full-File Symbol Declaration Pre-Extraction & Read-Evidence Fingerprints**:
    - Scans `write`/`edit` payloads for all top-level `export function/class/interface/type`, `def`, `fn`, and `test()` declarations (`summarizeCodeChange`), solving the untracked-file empty `git diff` problem and large-file tail truncation.
-   - Extracts compact (~120-char) symbol fingerprints from `read`/`grep`/`lsp` results (`summarizeReadEvidence`) paired with a **Read-Synthesis Watermark** (`#readsSinceCheck > 0 && pureTextLength >= 80`) to accurately evaluate pure investigation/audit tasks.
+   - Extracts compact (~120-char) symbol fingerprints from `read`/`grep`/`lsp` results (`summarizeReadEvidence`) paired with a **Read-Synthesis Watermark** (a read plus >= 80 chars of analysis, see `Burst.hasPendingActivity` in `src/watcher/burst.ts`) to accurately evaluate pure investigation/audit tasks.
 4. **Prefix-Aligned Append-Only Micro-Ledger (`#turnLedger`)**:
    Structures prompts strictly as `[Static Goal & Master Plan] -> [Static Rules] -> [Append-Only Turn Ledger] -> [Current Burst Delta]` with a pinned `sessionId` and `promptCacheKey` to prevent cross-turn amnesia and maximize prefix cache hits.
 5. **Privacy & Secret Protection by Default (`redactSecrets` & `isSensitiveFilePath`)**:
@@ -146,6 +146,8 @@ xychart-beta
 
 ## 4. Installation
 
+Requires `omp` 18.13 or newer, whose runtime meets the `engines.bun` range in `package.json`.
+
 ### Option 1: Install via `omp` Marketplace (Recommended)
 
 ```bash
@@ -213,8 +215,12 @@ omp -e ~/.omp/plugins/omp-sidecar-todo-watcher
 ## Development & Testing
 
 ```bash
-bun test
+bun install
+bun run test
+bun run build
 ```
+
+`omp` installs plugins by copying the repository, so the built `dist/` is committed. The devenv pre-commit hook rebuilds it when source files are committed.
 
 ## License
 
