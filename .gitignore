@@ -1,0 +1,6 @@
+node_modules/
+.omp/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.DS_Store

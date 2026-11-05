@@ -1,0 +1,34 @@
+{
+  "name": "omp-sidecar-todo-watcher",
+  "version": "1.0.0",
+  "description": "Zero-friction Sidecar Todo Watcher & Cross-Session Peer Sync Broker plugin for Oh My Pi (omp)",
+  "license": "MIT",
+  "type": "module",
+  "main": "./src/index.ts",
+  "homepage": "https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher.git"
+  },
+  "scripts": {
+    "test": "bun test"
+  },
+  "omp": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "omp-plugin",
+    "todo",
+    "multi-agent",
+    "peer-sync"
+  ]
+}

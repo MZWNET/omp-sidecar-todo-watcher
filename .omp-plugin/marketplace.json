@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "omp-sidecar-todo-watcher",
+  "owner": {
+    "name": "lbyxiaolizi"
+  },
+  "metadata": {
+    "description": "Zero-friction Sidecar Todo Watcher & Cross-Session Peer Sync Broker for omp",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "sidecar-todo-watcher",
+      "version": "1.0.0",
+      "description": "Offloads todo tracking to a low-cost sidecar model (@smol/@tiny) and routes ReadSet/WriteSet-aware <peer-sync> notices across concurrent omp sessions",
+      "category": "productivity",
+      "homepage": "https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher",
+      "repository": "https://github.com/lbyxiaolizi/omp-sidecar-todo-watcher",
+      "license": "MIT",
+      "source": "./"
+    }
+  ]
+}
